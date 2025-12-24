@@ -1,77 +1,111 @@
+#include <ctype.h>
+#include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
-#include <ctype.h>
+#include <sys/stat.h>
 #include <dirent.h>
 #include <unistd.h>
 #include <sys/wait.h>
 
-long count_punct_in_file(const char *filepath) {
+// Функция из вашей Лаб №1
+long count_digits(const char *filepath) {
     FILE *file = fopen(filepath, "r");
-    if (!file) return -1;
-    long count = 0;
+    if (!file) {
+        perror("Ошибка открытия входного файла");
+        return -1;
+    }
+    long digit_count = 0;
     int ch;
     while ((ch = fgetc(file)) != EOF) {
-        if (ispunct(ch)) count++;
+        if (isdigit(ch))
+            digit_count++;
     }
     fclose(file);
-    return count;
+    return digit_count;
 }
 
 int main() {
-    int fd[2];
+    const char *input_dir = "input/";
+    const char *output_path = "output/result.txt";
+    int fd[2]; // Дескрипторы для pipe
+
     if (pipe(fd) == -1) {
-        perror("Pipe failed");
+        perror("Ошибка создания pipe");
         return 1;
     }
 
     pid_t pid = fork();
 
     if (pid < 0) {
-        perror("Fork failed");
+        perror("Ошибка fork");
         return 1;
     }
 
-    if (pid > 0) { // Родитель
-        close(fd[0]); // Закрываем чтение
-        DIR *dp = opendir("input/");
+    if (pid > 0) { 
+        /* --- РОДИТЕЛЬСКИЙ ПРОЦЕСС --- */
+        close(fd[0]); // Закрываем чтение, родитель только пишет
+
+        DIR *dp = opendir(input_dir);
+        if (dp == NULL) {
+            perror("Ошибка открытия директории");
+            close(fd[1]);
+            return 1;
+        }
+
         struct dirent *entry;
-        long max_punct = 0;
+        long total_digits = 0;
 
-        if (dp) {
-            while ((entry = readdir(dp)) != NULL) {
-                if (entry->d_name[0] == '.') continue;
-                char path[512];
-                snprintf(path, sizeof(path), "input/%s", entry->d_name);
-                long current = count_punct_in_file(path);
-                if (current > max_punct) max_punct = current;
+        printf("Родитель: обрабатываю файлы...\n");
+        while ((entry = readdir(dp)) != NULL) {
+            if (strcmp(".", entry->d_name) == 0 || strcmp("..", entry->d_name) == 0)
+                continue;
+
+            char filepath[512];
+            snprintf(filepath, sizeof(filepath), "%s%s", input_dir, entry->d_name);
+            long digits = count_digits(filepath);
+            if (digits >= 0) {
+                printf("Файл %s: %ld цифр\n", entry->d_name, digits);
+                total_digits += digits;
             }
-            closedir(dp);
         }
+        closedir(dp);
 
-        // Передача через pipe. Используем %10ld для фиксированной ширины (10 символов)
+        // Передача данных: фиксируем ширину в 10 символов для надежности
         char buffer[12];
-        int len = sprintf(buffer, "%10ld", max_punct);
-        write(fd[1], buffer, 10);
-        close(fd[1]);
+        int width = 10;
+        sprintf(buffer, "%*ld", width, total_digits); 
         
-        wait(NULL); // Ждем потомка
-        printf("Родитель: данные отправлены, потомок завершил работу.\n");
-    } else { // Потомок
-        close(fd[1]); // Закрываем запись
-        char buffer[11];
-        buffer[10] = '\0';
-        
-        read(fd[0], buffer, 10);
-        long received_max = atol(buffer);
-        close(fd[0]);
+        write(fd[1], buffer, width);
+        close(fd[1]); // Закрываем запись, чтобы потомок получил EOF
 
-        FILE *out = fopen("output/result_pipe.txt", "w");
-        if (out) {
-            fprintf(out, "Max punctuation count: %ld\n", received_max);
-            fclose(out);
+        wait(NULL); // Ждем завершения потомка
+        printf("Родитель: работа завершена.\n");
+
+    } else { 
+        /* --- ПРОЦЕСС-ПОТОМОК --- */
+        close(fd[1]); // Закрываем запись, потомок только читает
+
+        char buffer[11];
+        int width = 10;
+        
+        // Читаем ровно столько байт, сколько отправил родитель
+        ssize_t bytes_read = read(fd[0], buffer, width);
+        if (bytes_read > 0) {
+            buffer[bytes_read] = '\0';
+            long received_total = atol(buffer);
+
+            FILE *output = fopen(output_path, "w");
+            if (output) {
+                fprintf(output, "Общее количество цифр во всех файлах: %ld\n", received_total);
+                fclose(output);
+                printf("Потомок: данные записаны в %s\n", output_path);
+            } else {
+                perror("Потомок: ошибка открытия выходного файла");
+            }
         }
+        close(fd[0]);
         exit(0);
     }
+
     return 0;
 }
